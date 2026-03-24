@@ -1,6 +1,6 @@
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
-from astrbot.api.provider import ProviderRequest
+from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 import asyncio
@@ -47,7 +47,7 @@ Your translated content here
 
 
 @register(
-    "tts_sanitizer", "柯尔", "TTS文本过滤插件 - 支持双语TTS，透明包装TTS Provider，不修改消息链", "1.1.0"
+    "tts_sanitizer_bilingual", "柠弥", "TTS文本过滤插件 - 支持双语TTS，基于柯尔的tts_sanitizer扩展", "1.1.0"
 )
 class TTSSanitizerPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
@@ -88,6 +88,13 @@ class TTSSanitizerPlugin(Star):
         logger.info(
             "📢 工作模式: 透明包装 TTS Provider，不修改消息链，不产生额外消息"
         )
+        # 热重载时也尝试包装 Provider
+        try:
+            providers = self.context.get_all_tts_providers()
+            if providers:
+                self._wrap_all_providers()
+        except Exception:
+            pass  # 首次启动时 Provider 可能还没加载，由 on_astrbot_loaded 处理
 
     # =========================================================================
     # 双语 TTS：LLM 请求前注入提示词
@@ -136,7 +143,10 @@ class TTSSanitizerPlugin(Star):
             logger.warning(f"TTS过滤: 注册 Provider 变更钩子失败: {e}")
 
     def _wrap_all_providers(self):
-        """包装所有 TTS Provider"""
+        """包装所有 TTS Provider（热重载时先解包再重新包装）"""
+        # 先解包所有已包装的 Provider，确保热重载时闭包会更新
+        self._unwrap_all_providers()
+
         logger.info("TTS过滤: 开始包装 TTS Provider...")
         try:
             providers = self.context.get_all_tts_providers()
@@ -157,11 +167,11 @@ class TTSSanitizerPlugin(Star):
         if wrapped_count > 0:
             logger.info(f"TTS过滤: 已包装 {wrapped_count} 个 TTS Provider")
         else:
-            logger.info("TTS过滤: 所有 TTS Provider 已包装过，无需重复操作")
+            logger.warning("TTS过滤: 未能包装任何 Provider")
 
     def _wrap_provider(self, provider) -> bool:
         """包装单个 TTS Provider，返回是否成功包装"""
-        if getattr(provider, '_tts_sanitizer_wrapped', False):
+        if getattr(provider, '_tts_bilingual_wrapped', False):
             return False
 
         original_get_audio = provider.get_audio
@@ -204,8 +214,8 @@ class TTSSanitizerPlugin(Star):
             return await original_get_audio(filtered)
 
         provider.get_audio = wrapped_get_audio
-        provider._tts_sanitizer_wrapped = True
-        provider._tts_sanitizer_original_get_audio = original_get_audio
+        provider._tts_bilingual_wrapped = True
+        provider._tts_bilingual_original_get_audio = original_get_audio
 
         # 包装 get_audio_stream（Live Mode 支持）
         if provider.support_stream():
@@ -254,22 +264,22 @@ class TTSSanitizerPlugin(Star):
                     filter_task.cancel()
 
         provider.get_audio_stream = wrapped_get_audio_stream
-        provider._tts_sanitizer_original_get_audio_stream = original_get_audio_stream
+        provider._tts_bilingual_original_get_audio_stream = original_get_audio_stream
 
     def _unwrap_all_providers(self):
         """恢复所有被包装的 TTS Provider"""
         restored_count = 0
         for provider in self._wrapped_providers:
-            if hasattr(provider, '_tts_sanitizer_original_get_audio'):
-                provider.get_audio = provider._tts_sanitizer_original_get_audio
-                del provider._tts_sanitizer_original_get_audio
+            if hasattr(provider, '_tts_bilingual_original_get_audio'):
+                provider.get_audio = provider._tts_bilingual_original_get_audio
+                del provider._tts_bilingual_original_get_audio
 
-            if hasattr(provider, '_tts_sanitizer_original_get_audio_stream'):
-                provider.get_audio_stream = provider._tts_sanitizer_original_get_audio_stream
-                del provider._tts_sanitizer_original_get_audio_stream
+            if hasattr(provider, '_tts_bilingual_original_get_audio_stream'):
+                provider.get_audio_stream = provider._tts_bilingual_original_get_audio_stream
+                del provider._tts_bilingual_original_get_audio_stream
 
-            if hasattr(provider, '_tts_sanitizer_wrapped'):
-                del provider._tts_sanitizer_wrapped
+            if hasattr(provider, '_tts_bilingual_wrapped'):
+                del provider._tts_bilingual_wrapped
 
             restored_count += 1
 
@@ -278,18 +288,17 @@ class TTSSanitizerPlugin(Star):
             logger.info(f"TTS过滤: 已恢复 {restored_count} 个 TTS Provider")
 
     # =========================================================================
-    # 双语 TTS：从显示文本中去掉 «TTS»...«/TTS» 标签
+    # 双语 TTS：LLM 响应后提取翻译内容并缓存，同时从文本中去掉标签
     # =========================================================================
 
-    @filter.on_decorating_result()
-    async def on_decorating_result(self, event: AstrMessageEvent):
-        """从消息链中提取TTS内容并缓存，然后去掉标签，用户只看到中文"""
+    @filter.on_llm_response()
+    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """从 LLM 响应中提取 «TTS» 内容并缓存，同时去掉标签让用户只看到中文"""
         if not self.config.get("bilingual_tts", False):
             return
-        result = event.get_result()
-        if not result:
+        if not resp.result_chain:
             return
-        for seg in result.chain:
+        for seg in resp.result_chain.chain:
             if hasattr(seg, 'text') and seg.text:
                 en_match = EN_TAG_PATTERN.search(seg.text)
                 if en_match:
@@ -400,7 +409,22 @@ class TTSSanitizerPlugin(Star):
         text = re.sub(r'^\s*[,，、;；]\s*', '', text)
 
         # 7. 清理多余空格
-        return re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # 8. MiniMax TTS 停顿标记（仅在启用时）
+        if self.config.get("tts_pause_markers", False):
+            # 换行 → 停顿2拍
+            text = text.replace("\n", "<#2#>")
+            # 句号、问号、感叹号 → 停顿2拍
+            text = re.sub(r'([。？！?!])', r'\1<#2#>', text)
+            # 逗号、顿号、分号 → 停顿1拍
+            text = re.sub(r'([，,、;；])', r'\1<#1#>', text)
+            # 省略号、破折号 → 停顿2拍
+            text = re.sub(r'([…—]+)', r'\1<#2#>', text)
+            # 清理连续停顿标记
+            text = re.sub(r'(<#\d#>){2,}', lambda m: m.group(0)[-5:], text)
+
+        return text
 
     def should_skip_tts(self, text: str) -> bool:
         """检查是否跳过TTS"""
@@ -411,12 +435,12 @@ class TTSSanitizerPlugin(Star):
     # 命令
     # =========================================================================
 
-    @filter.command("tts_filter_test")
+    @filter.command("tts_bi_test")
     async def test_filter(self, event: AstrMessageEvent):
         """测试过滤功能"""
         full_msg = event.message_str.strip()
 
-        for cmd in ["/tts_filter_test", "tts_filter_test"]:
+        for cmd in ["/tts_bi_test", "tts_bi_test"]:
             if full_msg.startswith(cmd):
                 user_input = full_msg[len(cmd) :].strip()
                 break
@@ -425,7 +449,7 @@ class TTSSanitizerPlugin(Star):
 
         if not user_input:
             yield event.plain_result(
-                "请输入测试文本，例如：\n/tts_filter_test 你好(＾_＾)测试233"
+                "请输入测试文本，例如：\n/tts_bi_test 你好(＾_＾)测试233"
             )
             return
 
@@ -455,7 +479,7 @@ class TTSSanitizerPlugin(Star):
 
         yield event.plain_result(result)
 
-    @filter.command("tts_filter_stats")
+    @filter.command("tts_bi_stats")
     async def show_stats(self, event: AstrMessageEvent):
         """显示插件状态和配置信息"""
         filter_words = self.config.get("filter_words", DEFAULT_FILTER_WORDS)
@@ -482,15 +506,23 @@ class TTSSanitizerPlugin(Star):
 
         yield event.plain_result(result)
 
-    @filter.command("tts_filter_reload")
+    @filter.command("tts_bi_reload")
     async def reload_config(self, event: AstrMessageEvent):
         """重新加载配置并重新包装 Provider"""
         try:
             self._compile_patterns()
-            # 重新包装（检查是否有新 Provider）
+            # 重新包装（确保新配置生效）
             self._wrap_all_providers()
+
+            lang = self.config.get("tts_language", "English")
+            bilingual = self.config.get("bilingual_tts", False)
+            pause = self.config.get("tts_pause_markers", False)
             yield event.plain_result(
-                f"✅ 配置已重新加载，已包装 {len(self._wrapped_providers)} 个 Provider"
+                f"✅ 配置已重新加载\n"
+                f"• 双语TTS: {'✅ (' + lang + ')' if bilingual else '❌'}\n"
+                f"• 停顿标记: {'✅' if pause else '❌'}\n"
+                f"• 已包装 {len(self._wrapped_providers)} 个 Provider\n"
+                f"💡 切换语言后如果模型仍输出旧语言，请清空对话上下文"
             )
         except Exception as e:
             yield event.plain_result(f"❌ 重新加载失败: {e}")

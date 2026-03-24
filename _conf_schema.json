@@ -85,5 +85,10 @@
     "description": "是否启用调试模式，在日志中显示每次过滤的详细对比",
     "type": "bool",
     "default": false
+  },
+  "tts_pause_markers": {
+    "description": "为MiniMax TTS添加停顿标记（<#1#> <#2#>），让语音在标点处自然停顿",
+    "type": "bool",
+    "default": false
   }
 }
