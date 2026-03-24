@@ -1,10 +1,14 @@
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
+from astrbot.api.provider import ProviderRequest
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 import asyncio
 import re
 from typing import Optional, Dict, Any
+
+# 双语 TTS 标签正则：匹配 «TTS»...«/TTS»（支持换行）
+EN_TAG_PATTERN = re.compile(r'\s*«TTS»\s*(.*?)\s*«/TTS»', re.DOTALL)
 
 # 内置默认值（与 _conf_schema.json 保持一致）
 DEFAULT_REMOVE_PATTERNS = [
@@ -26,9 +30,24 @@ DEFAULT_FILTER_WORDS = [
 
 DEFAULT_REPLACEMENTS = ["233|哈哈哈", "666|厉害", "999|很棒", "555|呜呜呜"]
 
+# 默认双语 TTS 提示词模板，{language} 会被替换为配置的语言
+DEFAULT_BILINGUAL_PROMPT = """【语音朗读规则】
+每次回复时，在回复的最末尾另起一行，用 «TTS» 和 «/TTS» 标签附上你回复内容的{language}翻译版本。
+格式示例：
+你的中文回复内容
+«TTS»
+Your translated content here
+«/TTS»
+
+要求：
+- «TTS» 标签必须放在回复的最末尾，与正文之间换行分隔
+- 翻译内容应保持与中文原文相同的语气和情感
+- 不要在翻译中包含颜文字或中文字符
+- 不要解释或提及这个标签的存在"""
+
 
 @register(
-    "tts_sanitizer", "柯尔", "TTS文本过滤插件 - 透明包装TTS Provider，不修改消息链", "1.0.1"
+    "tts_sanitizer", "柯尔", "TTS文本过滤插件 - 支持双语TTS，透明包装TTS Provider，不修改消息链", "1.1.0"
 )
 class TTSSanitizerPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
@@ -42,6 +61,8 @@ class TTSSanitizerPlugin(Star):
         self._compile_patterns()
         # 记录已包装的 provider，用于卸载时恢复
         self._wrapped_providers: list = []
+        # 双语 TTS 缓存：on_decorating_result 提取后暂存，供 TTS 包装层读取
+        self._pending_tts_text: Optional[str] = None
 
     def _get_default_config(self) -> Dict[str, Any]:
         """获取默认配置"""
@@ -59,7 +80,7 @@ class TTSSanitizerPlugin(Star):
     async def initialize(self):
         """异步插件初始化方法"""
         logger.info(
-            f"TTS文本过滤插件 v1.0.1 已启动 - 最大字数: {self.config.get('max_length', 200)}"
+            f"TTS文本过滤插件 v1.1.0 已启动 - 最大字数: {self.config.get('max_length', 200)}, 双语TTS: {self.config.get('bilingual_tts', False)}"
         )
         logger.info(
             f"当前配置: 启用={self.config.get('enabled', True)}, 调试模式={self.config.get('debug_mode', False)}"
@@ -67,6 +88,27 @@ class TTSSanitizerPlugin(Star):
         logger.info(
             "📢 工作模式: 透明包装 TTS Provider，不修改消息链，不产生额外消息"
         )
+
+    # =========================================================================
+    # 双语 TTS：LLM 请求前注入提示词
+    # =========================================================================
+
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        """在 LLM 请求前注入双语 TTS 提示词"""
+        if not self.config.get("bilingual_tts", False):
+            return
+        if not self.config.get("enabled", True):
+            return
+
+        language = self.config.get("tts_language", "English")
+        prompt_template = self.config.get("bilingual_prompt", "") or DEFAULT_BILINGUAL_PROMPT
+        prompt = prompt_template.replace("{language}", language)
+
+        req.system_prompt += "\n\n" + prompt
+
+        if self.config.get('debug_mode', False):
+            logger.info(f"🌐 双语TTS: 已注入 {language} 提示词到 system_prompt")
 
     # =========================================================================
     # 核心：TTS Provider 包装
@@ -132,6 +174,17 @@ class TTSSanitizerPlugin(Star):
             
             if not plugin.config.get('enabled', True) or not text:
                 return await original_get_audio(text)
+
+            # 双语模式：优先使用 on_decorating_result 缓存的翻译内容
+            if plugin.config.get('bilingual_tts', False) and plugin._pending_tts_text:
+                tts_text = plugin._pending_tts_text
+                plugin._pending_tts_text = None  # 用完即清
+                if debug_mode:
+                    logger.info(f"🌐 双语TTS: 使用缓存内容朗读 '{tts_text[:50]}...'")
+                filtered = plugin._apply_filters(tts_text)
+                if not filtered.strip():
+                    return await original_get_audio("")
+                return await original_get_audio(filtered)
 
             # 超过最大朗读字数则跳过（返回空，TTS Provider 自行处理）
             max_len = plugin.config.get('max_length', 200)
@@ -225,6 +278,29 @@ class TTSSanitizerPlugin(Star):
             logger.info(f"TTS过滤: 已恢复 {restored_count} 个 TTS Provider")
 
     # =========================================================================
+    # 双语 TTS：从显示文本中去掉 «TTS»...«/TTS» 标签
+    # =========================================================================
+
+    @filter.on_decorating_result()
+    async def on_decorating_result(self, event: AstrMessageEvent):
+        """从消息链中提取TTS内容并缓存，然后去掉标签，用户只看到中文"""
+        if not self.config.get("bilingual_tts", False):
+            return
+        result = event.get_result()
+        if not result:
+            return
+        for seg in result.chain:
+            if hasattr(seg, 'text') and seg.text:
+                en_match = EN_TAG_PATTERN.search(seg.text)
+                if en_match:
+                    # 先提取并缓存 TTS 朗读内容
+                    self._pending_tts_text = en_match.group(1).strip()
+                    if self.config.get('debug_mode', False):
+                        logger.info(f"🌐 双语TTS: 缓存朗读内容 '{self._pending_tts_text[:50]}...'")
+                    # 再从显示文本中删掉标签
+                    seg.text = EN_TAG_PATTERN.sub('', seg.text).strip()
+
+    # =========================================================================
     # 过滤逻辑（保持不变）
     # =========================================================================
 
@@ -269,10 +345,31 @@ class TTSSanitizerPlugin(Star):
         return replacements
 
     def filter_text(self, text: str) -> str:
-        """过滤文本"""
+        """过滤文本 - 如果有 «TTS» 标签则提取翻译内容用于 TTS"""
+        if not text:
+            return ""
+
+        # 双语模式：检查是否有 «TTS»...«/TTS» 标签
+        if self.config.get("bilingual_tts", False):
+            en_match = EN_TAG_PATTERN.search(text)
+            if en_match:
+                en_text = en_match.group(1).strip()
+                if self.config.get('debug_mode', False):
+                    logger.info(f"🌐 双语TTS: 提取朗读内容 '{en_text[:50]}...'")
+                # 对提取的内容也跑一遍过滤（去颜文字等）
+                return self._apply_filters(en_text)
+
+        # 没有 «TTS» 标签或未启用双语 → 走原来的过滤逻辑
+        return self._apply_filters(text)
+
+    def _apply_filters(self, text: str) -> str:
+        """原有的过滤逻辑"""
         max_processing_length = self.config.get("max_processing_length", 10000)
         if not text or len(text) > max_processing_length:
             return ""
+
+        # 0. 先去掉 «TTS»...«/TTS» 标签（防止标签本身被朗读）
+        text = EN_TAG_PATTERN.sub("", text)
 
         # 1. 正则过滤（颜文字、括号内容、特殊符号等）
         for regex in self.remove_regex:
@@ -366,10 +463,11 @@ class TTSSanitizerPlugin(Star):
         wrapped_count = len(self._wrapped_providers)
         repeat_count = self.config.get("max_repeat_count", 2)
 
-        result = f"""📊 TTS过滤插件状态 v1.0.1
+        result = f"""📊 TTS过滤插件状态 v1.1.0
 
 🔧 状态:
 • 启用: {"✅" if self.config.get("enabled", True) else "❌"}
+• 双语TTS: {"✅ (" + self.config.get("tts_language", "English") + ")" if self.config.get("bilingual_tts", False) else "❌"}
 • 最大朗读字数: {self.config.get("max_length", 200)}（0=无限制）
 • 调试模式: {"✅" if self.config.get("debug_mode", False) else "❌"}
 • 已包装 Provider: {wrapped_count} 个

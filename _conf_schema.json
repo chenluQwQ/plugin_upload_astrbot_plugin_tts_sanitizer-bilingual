@@ -4,6 +4,22 @@
     "type": "bool",
     "default": true
   },
+  "bilingual_tts": {
+    "description": "双语TTS模式：开启后，插件自动注入提示词让模型输出翻译内容，TTS只朗读翻译语言，显示文本保留中文。",
+    "type": "bool",
+    "default": false
+  },
+  "tts_language": {
+    "description": "TTS朗读语言（双语模式下，模型会将回复翻译为此语言用于语音朗读）",
+    "type": "string",
+    "default": "English",
+    "hint": "例如：English, Japanese, Korean, French, Spanish, German 等"
+  },
+  "bilingual_prompt": {
+    "description": "双语TTS提示词模板（{language}会被替换为上方配置的语言）",
+    "type": "string",
+    "default": "【语音朗读规则】\n每次回复时，在回复的最末尾另起一行，用 «TTS» 和 «/TTS» 标签附上你回复内容的{language}翻译版本。\n格式示例：\n你的中文回复内容\n«TTS»\nYour translated content here\n«/TTS»\n\n要求：\n- «TTS» 标签必须放在回复的最末尾，与正文之间换行分隔\n- 翻译内容应保持与中文原文相同的语气和情感\n- 不要在翻译中包含颜文字或中文字符\n- 不要解释或提及这个标签的存在"
+  },
   "max_length": {
     "description": "最大朗读字数（超过此字数跳过朗读，防止token浪费，0表示无限制）",
     "type": "int",
