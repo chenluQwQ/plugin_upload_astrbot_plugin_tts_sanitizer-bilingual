@@ -1,5 +1,5 @@
-name: tts_sanitizer # 这是你的插件的唯一识别名。
-desc: TTS文本过滤插件 - 透明包装TTS Provider，支持双语TTS（中文显示+英文朗读），过滤颜文字、特殊符号等不适合语音朗读的内容 # 插件简短描述
-version: v1.1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: 柯尔 # 作者
-repo: https://github.com/Luna-channel/astrbot_plugin_tts_sanitizer # 插件的仓库地址
+name: tts_sanitizer_bilingual
+desc: TTS文本过滤插件 - 支持双语TTS、语音Tool、MiniMax停顿标记，基于柯尔的tts_sanitizer扩展
+version: v1.3.0
+author: 柠弥
+repo: https://github.com/chenluQwQ/astrbot_plugin_tts_sanitizer_bilingual

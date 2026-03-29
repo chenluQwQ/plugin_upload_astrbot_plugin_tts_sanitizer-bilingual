@@ -5,35 +5,52 @@
     "default": true
   },
   "bilingual_tts": {
-    "description": "双语TTS模式：开启后，插件自动注入提示词让模型输出翻译内容，TTS只朗读翻译语言，显示文本保留中文。",
+    "description": "双语TTS模式：开启后，TTS朗读翻译语言，显示文本保留中文。需要配置翻译API。",
     "type": "bool",
     "default": false
   },
   "tts_language": {
-    "description": "TTS朗读语言（双语模式下，模型会将回复翻译为此语言用于语音朗读）",
+    "description": "TTS朗读语言",
     "type": "string",
     "default": "English",
     "hint": "例如：English, Japanese, Korean, French, Spanish, German 等"
   },
-  "bilingual_prompt": {
-    "description": "双语TTS提示词模板（{language}会被替换为上方配置的语言）",
+  "translate_api_base": {
+    "description": "翻译API地址（OpenAI兼容格式）",
     "type": "string",
-    "default": "【语音朗读规则】\n每次回复时，在回复的最末尾另起一行，用 «TTS» 和 «/TTS» 标签附上你回复内容的{language}翻译版本。\n格式示例：\n你的中文回复内容\n«TTS»\nYour translated content here\n«/TTS»\n\n要求：\n- «TTS» 标签必须放在回复的最末尾，与正文之间换行分隔\n- 翻译内容应保持与中文原文相同的语气和情感\n- 不要在翻译中包含颜文字或中文字符\n- 不要解释或提及这个标签的存在"
+    "default": "",
+    "hint": "例如：https://openrouter.ai/api/v1 或 https://api.openai.com/v1"
+  },
+  "translate_api_key": {
+    "description": "翻译API密钥",
+    "type": "string",
+    "default": ""
+  },
+  "translate_model": {
+    "description": "翻译使用的模型（建议用便宜的小模型）",
+    "type": "string",
+    "default": "gpt-4o-mini",
+    "hint": "例如：gpt-4o-mini, google/gemini-2.0-flash-lite, deepseek/deepseek-chat 等"
+  },
+  "enable_speak_tool": {
+    "description": "启用语音Tool：让模型可以主动发送语音消息。用户说"说一句话"、"念给我听"等时模型会自动调用。",
+    "type": "bool",
+    "default": false
   },
   "max_length": {
-    "description": "最大朗读字数（超过此字数跳过朗读，防止token浪费，0表示无限制）",
+    "description": "最大朗读字数（超过此字数跳过朗读，0表示无限制）",
     "type": "int",
     "default": 200,
     "hint": "范围：0-1000"
   },
   "max_processing_length": {
-    "description": "最大处理文本长度（超过此长度跳过过滤，防止正则处理超长文本卡顿）",
+    "description": "最大处理文本长度（超过此长度跳过过滤）",
     "type": "int",
     "default": 10000,
     "hint": "范围：1000-50000"
   },
   "remove_patterns": {
-    "description": "正则过滤规则（匹配到的内容会被删除，一行一个正则表达式）",
+    "description": "正则过滤规则（匹配到的内容会被删除）",
     "type": "list",
     "items": { "type": "string" },
     "default": [
@@ -48,24 +65,17 @@
     ]
   },
   "filter_words": {
-    "description": "直接过滤的字符和词汇（会被TTS朗读出怪声的符号、颜文字用字、网络用语等）",
+    "description": "直接过滤的字符和词汇",
     "type": "list",
     "items": { "type": "string" },
     "default": [
-      "ω", "Ω",
-      "σ", "Σ",
-      "ε",
-      "д", "Д",
-      "´", "`",
-      "＝",
-      "∀", "∇",
-      "orz", "OTZ",
-      "QAQ", "QWQ", "TAT", "TUT",
-      "www"
+      "ω", "Ω", "σ", "Σ", "ε", "д", "Д",
+      "´", "`", "＝", "∀", "∇",
+      "orz", "OTZ", "QAQ", "QWQ", "TAT", "TUT", "www"
     ]
   },
   "replacement_words": {
-    "description": "替换词汇配置（格式：原词|替换词，一行一个）",
+    "description": "替换词汇配置（格式：原词|替换词）",
     "type": "list",
     "items": { "type": "string" },
     "default": [
@@ -76,18 +86,18 @@
     ]
   },
   "max_repeat_count": {
-    "description": "重复字符压缩：保留的最大重复数量（如设为2，哈哈哈哈→哈哈），设为0关闭此功能",
+    "description": "重复字符压缩（如设为2，哈哈哈哈→哈哈），0=关闭",
     "type": "int",
     "default": 2,
-    "hint": "范围：0-5，0=关闭"
+    "hint": "范围：0-5"
   },
-  "debug_mode": {
-    "description": "是否启用调试模式，在日志中显示每次过滤的详细对比",
+  "tts_pause_markers": {
+    "description": "为MiniMax TTS添加停顿标记（句号停2拍，逗号停1拍）",
     "type": "bool",
     "default": false
   },
-  "tts_pause_markers": {
-    "description": "为MiniMax TTS添加停顿标记（<#1#> <#2#>），让语音在标点处自然停顿",
+  "debug_mode": {
+    "description": "调试模式，在日志中显示详细过滤和翻译过程",
     "type": "bool",
     "default": false
   }
