@@ -1,10 +1,10 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
-from astrbot.api.provider import ProviderRequest, LLMResponse
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 import astrbot.api.message_components as Comp
 import asyncio
+import aiohttp
 import re
 from typing import Optional, Dict, Any
 
@@ -33,7 +33,7 @@ DEFAULT_REPLACEMENTS = ["233|哈哈哈", "666|厉害", "999|很棒", "555|呜呜
 
 
 @register(
-    "tts_sanitizer_bilingual", "柠弥", "TTS文本过滤插件 - 支持双语TTS和语音Tool，基于柯尔的tts_sanitizer扩展", "1.3.1"
+    "tts_sanitizer_bilingual", "柠弥", "TTS文本过滤插件 - 支持双语TTS和语音Tool，基于柯尔的tts_sanitizer扩展", "1.4.0"
 )
 class TTSSanitizerPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
@@ -46,6 +46,7 @@ class TTSSanitizerPlugin(Star):
 
         self._compile_patterns()
         self._wrapped_providers: list = []
+        self._http_session: Optional[aiohttp.ClientSession] = None
 
     def _get_default_config(self) -> Dict[str, Any]:
         return {
@@ -63,12 +64,18 @@ class TTSSanitizerPlugin(Star):
         """检查是否配置了独立翻译 API"""
         return bool(self.config.get("translate_api_key", ""))
 
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取可复用的 aiohttp 会话"""
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession()
+        return self._http_session
+
     async def initialize(self):
         bilingual = self.config.get('bilingual_tts', False)
         has_api = self._has_translate_api()
         speak_tool = self.config.get('enable_speak_tool', False)
         logger.info(
-            f"TTS文本过滤插件 v1.3.1 已启动 - 双语: {bilingual}, 翻译API: {has_api}, 语音Tool: {speak_tool}"
+            f"TTS文本过滤插件 v1.4.0 已启动 - 双语: {bilingual}, 翻译API: {has_api}, 语音Tool: {speak_tool}"
         )
         try:
             providers = self.context.get_all_tts_providers()
@@ -160,8 +167,12 @@ class TTSSanitizerPlugin(Star):
 
         wrapped_count = 0
         for provider in providers:
-            if self._wrap_provider(provider):
-                wrapped_count += 1
+            try:
+                if self._wrap_provider(provider):
+                    wrapped_count += 1
+            except Exception as e:
+                logger.warning(f"TTS过滤: 包装 Provider 失败: {e}")
+                continue
 
         if wrapped_count > 0:
             logger.info(f"TTS过滤: 已包装 {wrapped_count} 个 TTS Provider")
@@ -195,32 +206,31 @@ class TTSSanitizerPlugin(Star):
                     if translated:
                         if debug_mode:
                             logger.info(f"🌐 双语TTS: '{text[:30]}...' → '{translated[:30]}...'")
-                        filtered = plugin._apply_filters(translated)
-                        if filtered.strip():
-                            return await original_get_audio(filtered)
+                        text = translated  # 替换为翻译后文本，继续走统一流程
                 except Exception as e:
                     logger.warning(f"🌐 双语TTS: 翻译失败，降级为中文朗读: {e}")
-                    # 降级：不 return，继续走下面的普通模式
+                    # 降级：继续用原文走下面的普通模式
 
-            # === 普通模式：过滤后朗读 ===
-            max_len = plugin.config.get('max_length', 200)
-            if max_len > 0 and len(text) > max_len:
-                if debug_mode:
-                    logger.info(f"🚫 TTS过滤: 文本 {len(text)} 字超过限制 {max_len}，跳过")
-                return await original_get_audio("")
-
+            # === 统一处理：过滤 + 长度检查 ===
             filtered = plugin._apply_filters(text)
-            if debug_mode and filtered != text:
-                logger.info(f"🔧 TTS过滤: '{text[:30]}...' → '{filtered[:30]}...'")
             if not filtered.strip():
                 return await original_get_audio("")
+
+            max_len = plugin.config.get('max_length', 200)
+            if max_len > 0 and len(filtered) > max_len:
+                if debug_mode:
+                    logger.info(f"🚫 TTS过滤: 文本 {len(filtered)} 字超过限制 {max_len}，跳过")
+                return await original_get_audio("")
+
+            if debug_mode and filtered != text:
+                logger.info(f"🔧 TTS过滤: '{text[:30]}...' → '{filtered[:30]}...'")
             return await original_get_audio(filtered)
 
         provider.get_audio = wrapped_get_audio
         provider._tts_bilingual_wrapped = True
         provider._tts_bilingual_original_get_audio = original_get_audio
 
-        if provider.support_stream():
+        if hasattr(provider, 'support_stream') and provider.support_stream():
             self._wrap_provider_stream(provider)
 
         self._wrapped_providers.append(provider)
@@ -239,6 +249,7 @@ class TTSSanitizerPlugin(Star):
             bilingual = plugin.config.get('bilingual_tts', False) and plugin._has_translate_api()
 
             async def filter_worker():
+                max_len = plugin.config.get('max_length', 200)
                 while True:
                     text = await text_queue.get()
                     if text is None:
@@ -260,17 +271,19 @@ class TTSSanitizerPlugin(Star):
                             if translated:
                                 if debug_mode:
                                     logger.info(f"🌐 双语TTS[stream]: '{text[:30]}...' → '{translated[:30]}...'")
-                                filtered = plugin._apply_filters(translated)
-                                if filtered.strip():
-                                    await filtered_queue.put(filtered)
-                                continue
+                                text = translated  # 替换为翻译后文本，继续走统一流程
                         except Exception as e:
                             logger.warning(f"🌐 双语TTS[stream]: 翻译失败，降级中文: {e}")
 
-                    # 普通模式 / 翻译失败降级
+                    # 统一处理：过滤 + 长度检查
                     filtered = plugin._apply_filters(text)
-                    if filtered.strip():
-                        await filtered_queue.put(filtered)
+                    if not filtered.strip():
+                        continue
+                    if max_len > 0 and len(filtered) > max_len:
+                        if debug_mode:
+                            logger.info(f"🚫 TTS过滤[stream]: 文本 {len(filtered)} 字超过限制 {max_len}，跳过")
+                        continue
+                    await filtered_queue.put(filtered)
 
             filter_task = asyncio.create_task(filter_worker())
             try:
@@ -314,7 +327,6 @@ class TTSSanitizerPlugin(Star):
 
         url = f"{api_base}/chat/completions"
 
-        import aiohttp
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -336,14 +348,21 @@ class TTSSanitizerPlugin(Star):
             "temperature": 0.3,
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.warning(f"🌐 翻译API错误 {resp.status}: {error_text[:200]}")
-                    return None
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"].strip()
+        session = await self._get_session()
+        async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                logger.warning(f"🌐 翻译API错误 {resp.status}: {error_text[:200]}")
+                return None
+            data = await resp.json()
+            # 防御式解析：避免上游返回异常结构时 KeyError
+            choices = data.get("choices")
+            if not choices or not isinstance(choices, list):
+                logger.warning(f"🌐 翻译API返回异常结构: {str(data)[:200]}")
+                return None
+            message = choices[0].get("message", {})
+            content = message.get("content", "")
+            return content.strip() if content else None
 
     # =========================================================================
     # 过滤逻辑
@@ -408,14 +427,15 @@ class TTSSanitizerPlugin(Star):
         text = re.sub(r'[,，、;；]\s*$', '', text)
         text = re.sub(r'^\s*[,，、;；]\s*', '', text)
 
-        text = re.sub(r"\s+", " ", text).strip()
-
+        # 停顿标记必须在空白折叠之前处理，否则 \n 会被吃掉
         if self.config.get("tts_pause_markers", False):
             text = text.replace("\n", "<#2#>")
             text = re.sub(r'([。？！?!])', r'\1<#2#>', text)
             text = re.sub(r'([，,、;；])', r'\1<#1#>', text)
             text = re.sub(r'([…—]+)', r'\1<#2#>', text)
             text = re.sub(r'(<#\d#>){2,}', lambda m: m.group(0)[-5:], text)
+
+        text = re.sub(r"\s+", " ", text).strip()
 
         return text
 
@@ -460,7 +480,7 @@ class TTSSanitizerPlugin(Star):
         has_api = self._has_translate_api()
         model = self.config.get("translate_model", "gpt-4o-mini") if has_api else "N/A"
 
-        result = f"""📊 TTS过滤插件 v1.3.1
+        result = f"""📊 TTS过滤插件 v1.4.0
 
 • 启用: {"✅" if self.config.get("enabled", True) else "❌"}
 • 双语TTS: {"✅ (" + self.config.get("tts_language", "English") + ")" if self.config.get("bilingual_tts", False) else "❌"}
@@ -494,4 +514,6 @@ class TTSSanitizerPlugin(Star):
 
     async def terminate(self):
         self._unwrap_all_providers()
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
         logger.info("TTS过滤插件已停止，所有 TTS Provider 已恢复原始状态")
