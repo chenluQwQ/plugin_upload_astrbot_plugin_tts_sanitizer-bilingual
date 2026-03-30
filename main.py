@@ -33,7 +33,7 @@ DEFAULT_REPLACEMENTS = ["233|哈哈哈", "666|厉害", "999|很棒", "555|呜呜
 
 
 @register(
-    "tts_sanitizer_bilingual", "柠弥", "TTS文本过滤插件 - 支持双语TTS和语音Tool，基于柯尔的tts_sanitizer扩展", "1.3.0"
+    "tts_sanitizer_bilingual", "柠弥", "TTS文本过滤插件 - 支持双语TTS和语音Tool，基于柯尔的tts_sanitizer扩展", "1.3.1"
 )
 class TTSSanitizerPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
@@ -68,7 +68,7 @@ class TTSSanitizerPlugin(Star):
         has_api = self._has_translate_api()
         speak_tool = self.config.get('enable_speak_tool', False)
         logger.info(
-            f"TTS文本过滤插件 v1.3.0 已启动 - 双语: {bilingual}, 翻译API: {has_api}, 语音Tool: {speak_tool}"
+            f"TTS文本过滤插件 v1.3.1 已启动 - 双语: {bilingual}, 翻译API: {has_api}, 语音Tool: {speak_tool}"
         )
         try:
             providers = self.context.get_all_tts_providers()
@@ -89,8 +89,11 @@ class TTSSanitizerPlugin(Star):
             text(string): 要朗读的文本内容
         '''
         if not self.config.get("enable_speak_tool", False):
+            logger.info(f"🎤 speak tool: 未启用，回退纯文字")
             yield event.plain_result(text)
             return
+
+        debug_mode = self.config.get('debug_mode', False)
 
         try:
             providers = self.context.get_all_tts_providers()
@@ -100,16 +103,22 @@ class TTSSanitizerPlugin(Star):
                 return
 
             provider = providers[0]
-            # 调用 get_audio（已被我们包装，会自动翻译/过滤）
+            if debug_mode:
+                logger.info(f"🎤 speak tool: 调用 TTS，文本: '{text[:50]}...'")
+
             audio_path = await provider.get_audio(text)
+
+            if debug_mode:
+                logger.info(f"🎤 speak tool: TTS 返回 audio_path={audio_path}")
 
             if audio_path:
                 yield event.chain_result([Comp.Plain(text), Comp.Record(file=audio_path, url=audio_path)])
             else:
+                logger.warning("🎤 speak tool: TTS 返回空路径，仅发送文字")
                 yield event.plain_result(text)
 
         except Exception as e:
-            logger.warning(f"🎤 speak tool 失败: {e}")
+            logger.warning(f"🎤 speak tool 失败: {e}", exc_info=True)
             yield event.plain_result(text)
 
     # =========================================================================
@@ -190,7 +199,8 @@ class TTSSanitizerPlugin(Star):
                         if filtered.strip():
                             return await original_get_audio(filtered)
                 except Exception as e:
-                    logger.warning(f"🌐 双语TTS: 翻译失败，降级为中文: {e}")
+                    logger.warning(f"🌐 双语TTS: 翻译失败，降级为中文朗读: {e}")
+                    # 降级：不 return，继续走下面的普通模式
 
             # === 普通模式：过滤后朗读 ===
             max_len = plugin.config.get('max_length', 200)
@@ -225,6 +235,8 @@ class TTSSanitizerPlugin(Star):
             audio_queue: "asyncio.Queue[bytes | tuple[str, bytes] | None]",
         ) -> None:
             filtered_queue: asyncio.Queue[str | None] = asyncio.Queue()
+            debug_mode = plugin.config.get('debug_mode', False)
+            bilingual = plugin.config.get('bilingual_tts', False) and plugin._has_translate_api()
 
             async def filter_worker():
                 while True:
@@ -235,6 +247,27 @@ class TTSSanitizerPlugin(Star):
                     if not plugin.config.get('enabled', True):
                         await filtered_queue.put(text)
                         continue
+
+                    # 清理 «TTS» 标签残留
+                    text = EN_TAG_PATTERN.sub("", text).strip()
+                    if not text:
+                        continue
+
+                    # 双语模式：翻译后过滤
+                    if bilingual:
+                        try:
+                            translated = await plugin._translate_text(text)
+                            if translated:
+                                if debug_mode:
+                                    logger.info(f"🌐 双语TTS[stream]: '{text[:30]}...' → '{translated[:30]}...'")
+                                filtered = plugin._apply_filters(translated)
+                                if filtered.strip():
+                                    await filtered_queue.put(filtered)
+                                continue
+                        except Exception as e:
+                            logger.warning(f"🌐 双语TTS[stream]: 翻译失败，降级中文: {e}")
+
+                    # 普通模式 / 翻译失败降级
                     filtered = plugin._apply_filters(text)
                     if filtered.strip():
                         await filtered_queue.put(filtered)
@@ -427,7 +460,7 @@ class TTSSanitizerPlugin(Star):
         has_api = self._has_translate_api()
         model = self.config.get("translate_model", "gpt-4o-mini") if has_api else "N/A"
 
-        result = f"""📊 TTS过滤插件 v1.3.0
+        result = f"""📊 TTS过滤插件 v1.3.1
 
 • 启用: {"✅" if self.config.get("enabled", True) else "❌"}
 • 双语TTS: {"✅ (" + self.config.get("tts_language", "English") + ")" if self.config.get("bilingual_tts", False) else "❌"}
