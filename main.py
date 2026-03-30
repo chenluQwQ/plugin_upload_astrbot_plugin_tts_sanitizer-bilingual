@@ -104,7 +104,7 @@ class TTSSanitizerPlugin(Star):
             audio_path = await provider.get_audio(text)
 
             if audio_path:
-                yield event.chain_result([Comp.Record(file=audio_path, url=audio_path)])
+                yield event.chain_result([Comp.Plain(text), Comp.Record(file=audio_path, url=audio_path)])
             else:
                 yield event.plain_result(text)
 
