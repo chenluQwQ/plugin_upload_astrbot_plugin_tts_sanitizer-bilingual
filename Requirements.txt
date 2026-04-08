@@ -1,1 +1,2 @@
-aiohttp
+dependencies:
+  - aiohttp
